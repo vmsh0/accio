@@ -1,0 +1,276 @@
+#!/usr/bin/sh
+
+# Copyright 2020 Riccardo Paolo Bestetti <pbl@bestov.io>
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+read -d '' help <<HEREDOC || true
+Commands:
+  - help: shows this message
+  - key <volname>: deploy the key for <volname> in /run/cryptsetup-keys.d/<devname>.key
+  - enroll <volname> <dev>: guided setup for <volname> on device <dev>
+  - deroll <volname> <dev>: delete enrolled key for <volname> on device <dev>
+  - verify: verify all configuration files in /etc/cryptsetup-keys.d/
+HEREDOC
+
+chal_prompt="Insert the key challenge now, or press Ctrl-C to proceed with a passphrase"
+key_prompt="Plug in and activate your hardware token now, or press Enter or Ctrl-C to proceed with a passphrase"
+Fluffy="Accio"
+fluffy="accio"
+
+slot=
+challenge=
+config_valid=1
+
+parse_config()
+{
+    IFS="="
+    while read -r name value; do
+        case $name in
+            "slot")
+                slot=$value
+                ;;
+            "challenge")
+                challenge=$value
+                ;;
+            *)
+                if [ ! -z $name ]; then
+                    >&2 echo "$Fluffy: unknown option '$name' in $1.$fluffy"
+                fi
+        esac
+    done < "/etc/cryptsetup-keys.d/$1.$fluffy"
+    unset IFS
+    
+    if [ ! "$slot" = "1" ] && [ ! "$slot" = "2" ]; then
+        config_valid=0
+        slot=
+        >&2 echo "$Fluffy: invalid slot '$slot' in $1.$fluffy"
+    fi
+
+    case $challenge in
+        "query"|"file"|"ascii:"*) ;;
+        *)
+            config_valid=0
+            challenge=
+            >&2 echo "$Fluffy: invalid challenge '$challenge' in $1.$fluffy"
+            ;;
+    esac
+}
+
+prepare_challenge()
+{
+    mkdir -p "/run/cryptsetup-keys.d/"
+    
+    case $challenge in
+        "query")
+            chal=$(systemd-ask-password "$Fluffy: $chal_prompt: ")
+            if [ ! $? -eq "0" ]; then
+                return 1
+            fi
+            echo -n "$chal" > "/run/cryptsetup-keys.d/$1.challenge"
+            ;;
+        "file")
+            if [ ! -f "/etc/cryptsetup-keys.d/$1.challenge" ]; then
+                >&2 echo "$Fluffy: can't find challenge file for $1"
+                return 1
+            fi
+            cp "/etc/cryptsetup-keys.d/$1.challenge" "/run/cryptsetup-keys.d/$1.challenge"
+            ;;
+        "ascii:"*)
+            echo -n "$challenge" | cut -c 7- | tr -d "\n\r" > "/run/cryptsetup-keys.d/$1.challenge"
+            ;;
+        *)
+            >&2 echo "$Fluffy: invalid challenge! This is a bug; please report"
+            return 1
+    esac
+
+    return 0
+}
+
+deploy()
+{
+    if [ ! -f "/etc/cryptsetup-keys.d/$1.$fluffy" ]; then
+        echo "$Fluffy: $1 doesn't have a corresponding $fluffy file, skipping"
+        exit 0
+    fi
+
+    parse_config $1
+    if [ "$config_valid" -eq "0" ]; then
+        >&2 echo "$Fluffy: key deployment failed: invalid configuration"
+        exit 1
+    fi
+
+    prepare_challenge $1
+    if [ "$?" -eq "1" ]; then
+        >&2 echo "$Fluffy: key deployment failed: cannot prepare challenge"
+        exit 1
+    fi
+
+    systemd-ask-password --no-tty --echo --no-output "$Fluffy: $key_prompt" &
+    prompt_pid=$!
+
+    while kill -0 $prompt_pid >/dev/null 2>&1; do
+        key=$(cat "/run/cryptsetup-keys.d/$1.challenge" | ykchalresp -$slot -H -i- 2>/dev/null)
+        if [ "$?" -eq "0" ]; then
+            break
+        fi
+        sleep 1
+    done
+
+    shred -u "/run/cryptsetup-keys.d/$1.challenge"
+
+    if [ -z $key ]; then
+        exit 0
+    fi
+
+    kill -15 $prompt_pid
+
+    echo -n "$key" > "/run/cryptsetup-keys.d/$1.key"
+}
+
+enroll()
+{
+    if [ ! -f "/etc/cryptsetup-keys.d/$1.$fluffy" ]; then
+        echo "$Fluffy: $3 failed: $1 doesn't have a corresponding $fluffy file"
+        exit 1
+    fi
+
+    lsblk $2 >/dev/null 2>&1
+    if [ ! "$?" -eq "0" ]; then
+        echo "$Fluffy: $3 failed: device $2 does not exist"
+        exit 1
+    fi
+
+    parse_config $1
+    if [ "$config_valid" -eq "0" ]; then
+        >&2 echo "$Fluffy: $3 failed: invalid configuration"
+        exit 1
+    fi
+
+    prepare_challenge $1
+    if [ "$?" -eq "1" ]; then
+        >&2 echo "$Fluffy: $3 failed: cannot prepare challenge"
+        exit 1
+    fi
+
+    echo -n "$Fluffy: $3: please insert your Yubikey..."
+    while true; do
+        key=$(cat "/run/cryptsetup-keys.d/$1.challenge" | ykchalresp -$slot -H -i- 2>/dev/null)
+        if [ "$?" -eq "0" ]; then
+            break
+        fi
+        sleep 1
+        echo -n "."
+    done
+    echo " ok!"
+
+    echo "$Fluffy: $3: please wait, this is going to take a while"
+
+    shred -u "/run/cryptsetup-keys.d/$1.challenge"
+
+    echo -n "$key" > "/run/cryptsetup-keys.d/$1.key"
+
+    cat "/run/cryptsetup-keys.d/$1.key" | cryptsetup --test-passphrase open $2 >/dev/null 2>&1
+    res=$?
+    case $3 in
+        "enroll")
+            if [ "$res" -eq "0" ]; then
+                echo "$Fluffy: enroll cancelled: device $2 can already be unlocked with this key"
+                shred -u "/run/cryptsetup-keys.d/$1.key"
+                exit 1
+            fi
+
+            echo "$Fluffy: enroll: cryptsetup will now ask your for an existing passphrase"
+            cryptsetup luksAddKey $2 "/run/cryptsetup-keys.d/$1.key"
+            cat "/run/cryptsetup-keys.d/$1.key" | cryptsetup --test-passphrase open $2 >/dev/null 2>&1
+            if [ ! "$?" -eq "0" ]; then
+                echo "$Fluffy: enroll failed. This is probably a bug; please report"
+                shred -u "/run/cryptsetup-keys.d/$1.key"
+                exit 1
+            fi
+            ;;
+        "deroll")
+            if [ ! "$res" -eq "0" ]; then
+                echo "$Fluffy: deroll cancelled: device $2 cannot be unlocked with this key"
+                shred -u "/run/cryptsetup-keys.d/$1.key"
+                exit 1
+            fi
+
+            cryptsetup luksRemoveKey $2 "/run/cryptsetup-keys.d/$1.key"
+            cat "/run/cryptsetup-keys.d/$1.key" | cryptsetup --test-passphrase open $2 >/dev/null 2>&1
+            if [ "$?" -eq "0" ]; then
+                echo "$Fluffy: deroll failed. This is probably a bug; please report"
+                shred -u "/run/cryptsetup-keys.d/$1.key"
+                exit 1
+            fi
+            ;;
+    esac
+
+    echo "$Fluffy: $3: success!"
+    shred -u "/run/cryptsetup-keys.d/$1.key"
+}
+
+print_help()
+{
+    if [ "$2" -eq "0" ]; then
+        cat <<HEREDOC
+$Fluffy, initrd cryptsetup hook to retrieve keys from hardware tokens
+usage: $1 <command> [<params>]
+
+$help
+HEREDOC
+    else
+        cat <<HEREDOC
+$Fluffy: invalid usage
+usage: $1 <command> [<params>]
+
+$help
+HEREDOC
+    fi
+}
+
+case $1 in
+    "help"|"--help"|"-h")
+        print_help $0 0
+        ;;
+    "key")
+        deploy $2
+        ;;
+    "verify")
+        for f in /etc/cryptsetup-keys.d/*.$fluffy; do
+            if [ -f "$f" ]; then 
+                vol=$(basename "$f" ".$fluffy")
+                echo "$Fluffy: verifying $vol..."
+                parse_config $vol
+                if [ "$config_valid" -eq "0" ]; then
+                    echo "$Fluffy: verification for $vol failed"
+                else
+                    if [ "$challenge" = "file" ] &&
+                        [ ! -f "/etc/cryptsetup-keys.d/$vol.challenge" ]; then
+                        echo "$Fluffy: challenge for $vol is 'file' but $vol.challenge does not exist"
+                        echo "$Fluffy: verification for $vol failed"
+                    else
+                        echo "$Fluffy: verification for $vol succeeded"
+                    fi
+                fi
+            fi
+        done
+        ;;
+    "enroll"|"deroll")
+        enroll $2 $3 $1
+        ;;
+    *)
+        print_help $0 1
+esac
+

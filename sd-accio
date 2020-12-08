@@ -1,0 +1,55 @@
+#!/bin/bash
+
+# Copyright 2020 Riccardo Paolo Bestetti <pbl@bestov.io>
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+build() {
+    # add accio soft dependency to systemd-cryptsetup@.service
+    # those units are generated at runtime by systemd-cryptsetup-generator, depending on the
+    # crypttab and the kernel parameters, and are the units that actually open encrypted volumes
+    mkdir -p "$BUILDROOT/etc/systemd/system/systemd-cryptsetup@.service.d"
+    cat <<HEREDOC >"$BUILDROOT/etc/systemd/system/systemd-cryptsetup@.service.d/10-accio.conf"
+[Unit]
+Wants=accio-deploy-key@%i.service
+After=accio-deploy-key@%i.service
+HEREDOC
+
+    # add accio and dependencies
+    add_binary "accio"
+    add_binary "shred"
+    add_binary "tr"
+    add_binary "systemd-ask-password"
+    add_binary "ykchalresp"
+    add_systemd_unit "accio-deploy-key@.service"
+
+    for f in /etc/cryptsetup-keys.d/*.{accio,challenge}; do
+        if [ -f "$f" ]; then
+            add_file "$f"
+        fi
+    done
+}
+
+help() {
+    echo <<HELPEOF
+This hook enables accio inside your initrd.
+
+It will only work for crypt devices configured with a corresponding .accio file
+in /etc/cryptsetup-keys.d/.
+
+See accio(1) for more information.
+HELPEOF
+}
+
+# vim: set ft=sh ts=4 sw=4 et:
