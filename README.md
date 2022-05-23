@@ -1,6 +1,12 @@
 # Accio
 **Initrd cryptsetup hook to retrieve keys from hardware tokens**
 
+## IMPORTANT NOTICE
+
+This software is no longer supported, because as of systemd v248 we have the "fido2-device=auto" crypttab option. As of today (v251), that still has some bugs related to falling back to using a password. If those break your use case, please refer to [systemd issue #19872](https://github.com/systemd/systemd/issues/19872), and feel free to use this software (which is very small in surface and should be relatively safe) while that gets fixed, but please do switch to the officially supported solution as soon as you can!
+
+### (end of important notice)
+
 Accio is a very small software package which helps you setting up luks volume activation using hardware tokens such as YubiKeys.
 
 Accio is currently in a proto-implementation phase: it is currently written in Bash and only works with a subset of YubiKey tokens (those which support the HMAC-SHA1 challenge-response application).
